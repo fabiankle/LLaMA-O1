@@ -1050,7 +1050,7 @@ import torch
 # 假设您已经定义了 TreeNode、MCTS 和 RLSPTrainer 类
 
 # 加载模型和 tokenizer
-model_name = "/mnt/hwfile/ai4chem/CKPT/longcot_pt_GEMMA_ZD_10_23_1"
+model_name = "qq8933/OpenLongCoT-Base-Gemma2-2B"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(
     model_name, torch_dtype=torch.bfloat16,
