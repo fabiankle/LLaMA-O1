@@ -1,14 +1,18 @@
 # LLaMA-O1: Open Large Reasoning Model Frameworks For Training, Inference and Evaluation With PyTorch and HuggingFace
 Large Reasoning Models powered by Monte Carlo Tree Search (MCTS), Self-Play Reinforcement Learning, PPO, AlphaGo Zero's dua policy paradigm and Large Language Models!
+
 **DISCLAIM: This repository was for personal experimentation only and has no connection with any third-party organization or institution.**
 ![alt text](image-1.png)
 ## Call for Contributors！
 ### Known issues
 [] limited Sampling speed
+
   working in progress
 
  
 [] Deepspeed initialization bug
+
+Fixed
 ## Tutorials
 [From AlphaGO Zero to RLHF...TBD]()
 ## Datasets
