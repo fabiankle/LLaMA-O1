@@ -29,7 +29,7 @@ TBD: Pretrain Code, recommend using LLaMaFactory for now.
 [Gemma2-2B-OpenLongCoT](https://huggingface.co/qq8933/OpenLongCoT-Base-Gemma2-2B)
 
 ### Install
-Setup Envoirments,
+Setup Environments,
 
 ```
 pip install torch transformers accelerate peft datasets 
