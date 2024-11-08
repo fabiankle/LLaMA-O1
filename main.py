@@ -2,7 +2,7 @@
 
 import math
 import random
-
+import torch
 import accelerate
 import torch.nn.functional as F
 from datasets import Dataset
@@ -16,213 +16,17 @@ from transformers import TrainingArguments
 
 from grading import check
 from llama_o1.constants import GENERATE_MAX_NEW_TOKENS, CUT_OFF_LEN
-from llama_o1.mcts import MCTS, TreeNode, sampling_meta_action
+from llama_o1.mcts import MCTS, TreeNode
+from llama_o1.policies import value_head_template, problem_declaration_template, policy_head_template
 from llama_o1.utils import set_left_truncate, get_root, path_to_string, get_max_node_id_in_tree, \
-    manual_seed
-
-accelerator = accelerate.Accelerator()
+    manual_seed, length_normed_log_probs, clean_generated_text
 
 
-hint = '<hint> Try generate a reasonable rationale solution that can got final answer {GT}</hint>'
-# hint = ''
-hint_for_critics = f"<hint> Point out the potential flaws in the current solution. </hint>"
-hint_for_refine = f"<hint> Try to refine the current solution for higher quality. </hint>"
-hint_for_conclusion = "<hint> Try to summarize the current solution and draw a conclusion. Final answer should bracket in \\box{answer} </hint>"
-hint_for_divide_and_conquer = f"<hint> Try divide the problem into smaller easier sub-problems and solve them divide-and-conquer. </hint>"
+import pickle
+import gzip
+import numpy as np
+import os
 
-
-import torch
-
-
-# 模板生成函数
-# Template generation functions
-def problem_declaration_template(problem):
-    return f"<start_of_father_id>-1<end_of_father_id><start_of_local_id>0<end_of_local_id><start_of_thought><problem>{problem}<end_of_thought>"
-
-def selection_head_template(tree):
-    return tree.to_string() + "\n<start_of_father_id>"
-
-def policy_head_template(selected_node, local_id, meta="", hint=""):
-    return (
-        path_to_string(selected_node)
-        + f"{hint}\n<start_of_father_id>{selected_node.index if selected_node else -1}<end_of_father_id><start_of_local_id>{local_id}<end_of_local_id><start_of_thought>{meta}"
-    )
-
-def value_head_template(selected_node):
-    return (
-        path_to_string(selected_node.parent)
-        + f"\n<start_of_father_id>{selected_node.parent.index if selected_node.parent else -1}<end_of_father_id><start_of_local_id>{selected_node.index}<end_of_local_id><start_of_thought>{selected_node.state}<end_of_thought><start_of_rating>"
-    )
-
-selection_head_stopping_criteria = ["<end_of_father_id>"]
-
-policy_head_stopping_criteria = ["<end_of_thought>"]
-
-value_head_stopping_criteria = ["<end_of_rating>"]
-
-def clean_generated_text(text):
-    return text[: text.find("<end_of_thought>")]
-
-def find_max_reward_path(node) -> tuple[float, int]:
-    """
-      Greedily traverses the children of node, each time choosing the child with highest value, until a leaf is reached
-
-      ! Only used for logging purpose !
-
-     :return:  the exp(sum of values along this path) as well as the path length
-    """
-    path = 0
-    reward = 0
-    while node:
-        reward += node.value
-        path += 1
-        if not node.children:
-            break
-        node = max(node.children, key=lambda x: x.value)
-    return math.exp(reward), path
-
-# 数值稳定的 softmax 函数
-# Numerically stable softmax functions
-def robust_softmax(logits):
-    logits = torch.tensor(logits) if not isinstance(logits, torch.Tensor) else logits
-    log_probs = F.log_softmax(logits, dim=-1)
-    probs = torch.exp(log_probs)
-    return probs, log_probs
-
-
-# 长度归一化的对数概率、熵和熵的方差计算
-# Length-normalized log probability, entropy, and variance calculation of entropy
-def length_normed_log_probs(sequence_ids, logits_tensor, attention_mask=None, return_entropy=False, return_varentropy=False):
-    logits_tensor = logits_tensor[..., :-1, :].contiguous()
-    sequence_ids = sequence_ids[..., 1:].contiguous()
-    attention_mask = attention_mask[..., 1:].contiguous() if attention_mask is not None else None
-    log_probs = F.log_softmax(logits_tensor, dim=-1)
-    selected_log_probs = log_probs.gather(2, sequence_ids.unsqueeze(-1)).squeeze(-1)
-
-    if attention_mask is not None:
-        selected_log_probs = selected_log_probs * attention_mask
-
-    summed_log_probs = selected_log_probs.sum(dim=1)
-    length = sequence_ids.size(1) if attention_mask is None else attention_mask.sum(dim=1)
-    normalized_log_probs = summed_log_probs / length
-
-    if return_entropy or return_varentropy:
-        probs = torch.exp(log_probs)
-        entropy = -torch.sum(probs * log_probs, dim=-1)
-        if attention_mask is not None:
-            entropy = entropy * attention_mask
-        summed_entropy = entropy.sum(dim=1)
-        normalized_entropy = summed_entropy / length
-
-    if return_varentropy:
-        varentropy = torch.sum(probs * (log_probs + entropy.unsqueeze(-1)) ** 2, dim=-1)
-        if attention_mask is not None:
-            varentropy = varentropy * attention_mask
-        summed_varentropy = varentropy.sum(dim=1)
-        normalized_varentropy = summed_varentropy / length
-        return normalized_log_probs, normalized_entropy, normalized_varentropy
-
-    if return_entropy:
-        return normalized_log_probs, normalized_entropy
-    else:
-        return normalized_log_probs
-
-
-# 策略生成的主要函数
-# Value header generation function
-@torch.no_grad()
-def compute_policy_head(model, tokenizer, selected_node, num_candidates=3, meta="", envoirment=None):
-    local_id = get_max_node_id_in_tree(selected_node) + 1
-    hint_text = {
-        "<conclusion>": hint_for_critics,
-        "<problem>": hint_for_divide_and_conquer,
-        "<critic>": hint_for_critics,
-        "<refine>": hint_for_refine,
-    }.get(meta, hint.format(GT=envoirment.get_ground_truth(selected_node)))
-
-    inputs_string = policy_head_template(selected_node, local_id, meta, hint_text)
-    with set_left_truncate(tokenizer):
-        inputs = tokenizer(
-            inputs_string,
-            return_tensors="pt",
-            truncation=True,
-            padding='longest',
-            max_length=CUT_OFF_LEN
-        )
-    inputs = {k: v.to(accelerator.device) for k, v in inputs.items()}
-
-    outputs = accelerator.unwrap_model(model).generate(
-        input_ids=inputs['input_ids'],
-        attention_mask=inputs['attention_mask'],
-        max_new_tokens=GENERATE_MAX_NEW_TOKENS,
-        do_sample=True,
-        num_return_sequences=num_candidates,
-        return_dict_in_generate=True,
-        output_scores=True,
-        temperature=1.5,
-        output_logits=True,
-        stop_strings=policy_head_stopping_criteria,
-        tokenizer=tokenizer,
-    )
-
-    generated_sequences = outputs.sequences[:, inputs['input_ids'].size(1):]
-    generated_sequences_mask = generated_sequences != tokenizer.pad_token_id
-    generated_texts = tokenizer.batch_decode(generated_sequences, skip_special_tokens=True)
-
-    logits = torch.stack(outputs.logits, dim=1)
-    normalized_log_probs, normalized_entropy, varentropy = length_normed_log_probs(
-        generated_sequences, logits, attention_mask=generated_sequences_mask, return_entropy=True, return_varentropy=True
-    )
-
-    normalized_probs = torch.exp(normalized_log_probs)
-
-    generated_texts = [meta + clean_generated_text(text) for text in generated_texts]
-    for i, generated_text in enumerate(generated_texts):
-        if not generated_text.startswith(meta):
-            generated_texts[i] = meta + generated_text
-
-    return generated_texts, normalized_probs.tolist(), normalized_entropy.tolist(), varentropy.tolist(), [meta,] * num_candidates
-
-
-# 价值头生成函数
-@torch.no_grad()
-def compute_value_head(model, tokenizer, node):
-    text_for_value = value_head_template(node) + '<positive_rating>'
-    with set_left_truncate(tokenizer):
-        inputs = tokenizer(text_for_value, return_tensors="pt", truncation=True, padding='longest', max_length=CUT_OFF_LEN)
-    inputs = {k: v.to(accelerator.device) for k, v in inputs.items()}
-    outputs = model(**inputs, return_dict=True)
-    logits = outputs.logits
-
-    last_logits = logits[:, -2, :]
-    positive_token_id = tokenizer.convert_tokens_to_ids("<positive_rating>")
-    negative_token_id = tokenizer.convert_tokens_to_ids("<negative_rating>")
-
-    positive_logit = last_logits[:, positive_token_id]
-    negative_logit = last_logits[:, negative_token_id]
-    value_logits = torch.stack([positive_logit, negative_logit], dim=1)
-
-    probs, log_probs = robust_softmax(value_logits)
-    return log_probs[:, 0].item()
-
-
-# 元策略生成函数
-# Meta-strategy generation function
-@torch.no_grad()
-def meta_compute_policy_head(model, tokenizer, selected_node, num_candidates=3, meta_ratio=0.5, envoirment=None):
-    metas = sampling_meta_action(selected_node, num_candidates)
-    generated_texts, policy_probs, normalized_entropys, varentropys = [], [], [], []
-
-    for meta in metas:
-        texts, policy_probs, normalized_entropy, varentropy, _ = compute_policy_head(model, tokenizer,
-            selected_node, num_candidates=1, meta=meta, envoirment=envoirment
-        )
-        generated_texts.append(texts[0])
-        policy_probs.append(policy_probs[0])
-        normalized_entropys.append(normalized_entropy[0])
-        varentropys.append(varentropy[0])
-
-    return generated_texts, policy_probs, normalized_entropys, varentropys, metas
 
 def padding_nodes(tensor, max_len):
     feature_dim = tensor.size(-1)
@@ -377,8 +181,6 @@ def compute_gae_from_node(node, gamma=0.99, lambda_=0.95):
 
 
 
-
-
 def collator_fn(batch):
     indecies = [example['indices'] for example in batch]
     weights = [example['weights'] for example in batch]
@@ -387,12 +189,6 @@ def collator_fn(batch):
     batch['weights'] = torch.tensor(weights)  
     return batch
 
-
-
-import pickle
-import gzip
-import numpy as np
-import os
 
 class PrioritizedReplayBuffer:
     def __init__(self, capacity, alpha=0.6):
@@ -841,7 +637,7 @@ if __name__ == "__main__":
 
     # 设置训练轮数和批次大小
     # Setting the number of training rounds and batch size
-    num_iterations = 0
+    num_iterations = 1
 
     # 执行训练
     trainer.train(num_iterations=num_iterations)

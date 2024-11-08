@@ -1,16 +1,35 @@
 import copy
 import math
 from functools import lru_cache
-from random import random
-
-import peft
-from tqdm import tqdm
+import random
 import numpy as np
-from llama_o1.constants import MAX_CHILDREN_NUM, META_ACTION_TYPES, META_ACTION_TYPE_TO_INDEX
+import peft
 import torch
+from tqdm import tqdm
 
-from llama_o1.utils import get_max_node_id_in_tree, flatten_tree, np_softmax, get_root
-from main import find_max_reward_path, meta_compute_policy_head, compute_value_head, robust_softmax
+from llama_o1.constants import MAX_CHILDREN_NUM, META_ACTION_TYPES, META_ACTION_TYPE_TO_INDEX
+from llama_o1.policies import meta_compute_policy_head, compute_value_head
+from llama_o1.utils import get_max_node_id_in_tree, flatten_tree, np_softmax, get_root, robust_softmax
+
+
+def find_max_reward_path(node) -> tuple[float, int]:
+    """
+      Greedily traverses the children of node, each time choosing the child with highest value, until a leaf is reached
+
+      ! Only used for logging purpose !
+
+     :return:  the exp(sum of values along this path) as well as the path length
+    """
+    path = 0
+    reward = 0
+    while node:
+        reward += node.value
+        path += 1
+        if not node.children:
+            break
+        node = max(node.children, key=lambda x: x.value)
+    return math.exp(reward), path
+
 
 
 # Tree Node Structure
@@ -81,34 +100,6 @@ class TreeNode:
         return {key: prob for key, prob in zip(self.policy_varentropy.keys(), prob)}[child]
 
 
-
-def cal_meta_transition_probs(node: 'TreeNode'):
-    num_meta_actions = len(META_ACTION_TYPES)
-    # 展开树结构，获取父节点索引、子节点索引和对应的值
-    # Expand the tree structure and get the parent node index, child node index and corresponding values
-    parents, children, values = flatten_tree(node)
-    # 初始化转移概率矩阵
-    # Initialize the transfer probability matrix
-    TransitionProbs = np.zeros((num_meta_actions, num_meta_actions))
-    # 使用 NumPy 的高级索引和累加来更新矩阵
-    # Use NumPy's advanced indexing and accumulation to update matrices
-    if len(parents) > 0:
-        np.add.at(TransitionProbs, (parents, children), values)
-    return TransitionProbs
-
-
-@lru_cache()
-def sampling_meta_action(node: 'TreeNode', num=1, TransitionProbs=None):
-    if TransitionProbs is None:
-        root = get_root(node)
-        TransitionProbs = cal_meta_transition_probs(root)
-    # Calculate softmax for transfer probability
-    transition_probs_softmax = np_softmax(TransitionProbs)
-    i = META_ACTION_TYPE_TO_INDEX[node.meta]
-    p = transition_probs_softmax[i]
-    # 进行采样
-    meta_actions = np.random.choice(META_ACTION_TYPES, size=num, p=p)
-    return meta_actions
 
 
 # MCTS Search

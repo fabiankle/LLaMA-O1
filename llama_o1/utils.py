@@ -1,6 +1,8 @@
 import contextlib
 import math
-from functools import lru_cache
+import torch
+import torch.nn
+from torch.nn import functional as F
 
 import numpy as np
 
@@ -116,4 +118,58 @@ def np_softmax(x):
     e_x = np.exp(x - max_vals)
     sum_e_x = np.sum(e_x, axis=1, keepdims=True)
     return e_x / sum_e_x
+
+
+
+def clean_generated_text(text):
+    return text[: text.find("<end_of_thought>")]
+
+
+
+
+# 长度归一化的对数概率、熵和熵的方差计算
+# Length-normalized log probability, entropy, and variance calculation of entropy
+def length_normed_log_probs(sequence_ids, logits_tensor, attention_mask=None, return_entropy=False, return_varentropy=False):
+    logits_tensor = logits_tensor[..., :-1, :].contiguous()
+    sequence_ids = sequence_ids[..., 1:].contiguous()
+    attention_mask = attention_mask[..., 1:].contiguous() if attention_mask is not None else None
+    log_probs = F.log_softmax(logits_tensor, dim=-1)
+    selected_log_probs = log_probs.gather(2, sequence_ids.unsqueeze(-1)).squeeze(-1)
+
+    if attention_mask is not None:
+        selected_log_probs = selected_log_probs * attention_mask
+
+    summed_log_probs = selected_log_probs.sum(dim=1)
+    length = sequence_ids.size(1) if attention_mask is None else attention_mask.sum(dim=1)
+    normalized_log_probs = summed_log_probs / length
+
+    if return_entropy or return_varentropy:
+        probs = torch.exp(log_probs)
+        entropy = -torch.sum(probs * log_probs, dim=-1)
+        if attention_mask is not None:
+            entropy = entropy * attention_mask
+        summed_entropy = entropy.sum(dim=1)
+        normalized_entropy = summed_entropy / length
+
+    if return_varentropy:
+        varentropy = torch.sum(probs * (log_probs + entropy.unsqueeze(-1)) ** 2, dim=-1)
+        if attention_mask is not None:
+            varentropy = varentropy * attention_mask
+        summed_varentropy = varentropy.sum(dim=1)
+        normalized_varentropy = summed_varentropy / length
+        return normalized_log_probs, normalized_entropy, normalized_varentropy
+
+    if return_entropy:
+        return normalized_log_probs, normalized_entropy
+    else:
+        return normalized_log_probs
+
+
+# 数值稳定的 softmax 函数
+# Numerically stable softmax functions
+def robust_softmax(logits):
+    logits = torch.tensor(logits) if not isinstance(logits, torch.Tensor) else logits
+    log_probs = F.log_softmax(logits, dim=-1)
+    probs = torch.exp(log_probs)
+    return probs, log_probs
 
