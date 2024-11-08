@@ -165,7 +165,7 @@ class MCTS:
 
     def simulate(self, node: TreeNode):
         """
-          Either expands and evaluates the node itself (if not children or max children not yet reached)
+          Either expands and evaluates the node itself (if max children not yet reached)
           , or the best of its children (in that case: recursive call!); updates the node's value and returns it
 
         """

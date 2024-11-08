@@ -1,45 +1,26 @@
- # Imports and Model Initialization
-import copy
-from functools import lru_cache
+# Imports and Model Initialization
+
 import math
 import random
-import re
-import datasets
-from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, SinkCache
-from transformers.data.data_collator import DataCollator, DataCollatorWithPadding, default_data_collator
-import torch.nn.functional as F
-import torch.optim as optim
-import numpy as np
-from torch.nn.utils.rnn import pad_sequence
-import math
-import numpy as np
-import torch
 
-from transformers import StoppingCriteria, StoppingCriteriaList, Trainer, TrainingArguments
-from typing import List
-
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import peft
-from peft import get_peft_model, LoraConfig
-from collections import defaultdict
-import deepspeed
-import contextlib
 import accelerate
-
-from transformers import AutoModelForCausalLM, AutoTokenizer, AdamW
-import torch
-
+import torch.nn.functional as F
+from datasets import Dataset
 from datasets import load_dataset
+from peft import get_peft_model, LoraConfig
+from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import DataLoader
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import Trainer
+from transformers import TrainingArguments
 
-from llama_o1.mcts import MCTS, TreeNode
-from llama_o1.utils import set_left_truncate, sampling_meta_action, get_root, path_to_string, get_max_node_id_in_tree, \
+from grading import check
+from llama_o1.constants import GENERATE_MAX_NEW_TOKENS, CUT_OFF_LEN
+from llama_o1.mcts import MCTS, TreeNode, sampling_meta_action
+from llama_o1.utils import set_left_truncate, get_root, path_to_string, get_max_node_id_in_tree, \
     manual_seed
 
-from llama_o1.constants import GENERATE_MAX_NEW_TOKENS, CUT_OFF_LEN
-
 accelerator = accelerate.Accelerator()
-
 
 
 hint = '<hint> Try generate a reasonable rationale solution that can got final answer {GT}</hint>'
@@ -51,9 +32,7 @@ hint_for_divide_and_conquer = f"<hint> Try divide the problem into smaller easie
 
 
 import torch
-import torch.nn.functional as F
-from functools import lru_cache
-import random
+
 
 # 模板生成函数
 # Template generation functions
@@ -292,7 +271,6 @@ def tokenize_value_predict(node,tokenizer):
     inputs = {'value_' + k: v for k, v in inputs.items()}
     return inputs
 
-import torch
 
 def forward_value_predict(model, tokenizer, inputs):
     """
@@ -400,15 +378,6 @@ def compute_gae_from_node(node, gamma=0.99, lambda_=0.95):
 
 
 
-import os
-import pickle
-import random
-from transformers import Trainer
-from datasets import Dataset
-from torch.utils.data import DataLoader
-import torch
-import torch.nn.functional as F
-import numpy as np
 
 def collator_fn(batch):
     indecies = [example['indices'] for example in batch]
@@ -706,8 +675,7 @@ class RLSPTrainer(Trainer):
         # Save the replay buffer at the end of training
         self.replay_buffer.save(self.replay_buffer_file)
 
-import random
-from grading import check
+
 
 class Environment:
     def __init__(self, problems):
@@ -766,6 +734,7 @@ class Environment:
         return self.inverse_mapping.get(get_root(node).state)
 
     # 判断状态是否为正确答案的函数
+    # Functions that determine if a state is the correct answer
     def compute_rule_orm_head(self, node):
         """
         使用 grading 模块的 check 函数判断状态是否为正确答案。
@@ -778,6 +747,7 @@ class Environment:
         - result: 布尔值，表示状态是否为正确答案。
         """
         # 将状态和正确答案传入 check 函数进行比较
+
         try:
             ground_truth = self.inverse_mapping.get(get_root(node).state)
             result = check(ground_truth, node.state, "")
