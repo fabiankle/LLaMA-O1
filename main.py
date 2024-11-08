@@ -1,4 +1,4 @@
-# Imports and Model Initialization
+ # Imports and Model Initialization
 import copy
 from functools import lru_cache
 import math
@@ -91,6 +91,7 @@ def path_to_string(node):
 def get_max_node_id_in_tree(node):
     if not node.parent:
         while node.parent:
+            # todo klemmf: this does make sense?  / unreachable?
             node = node.parent
     max_id = node.index
     for child in node.children:
@@ -245,7 +246,7 @@ class TreeNode:
 class MCTS:
     def __init__(
         self,
-        envoirment,
+        environment,
         model,
         tokenizer,
         num_simulations=-1,
@@ -255,7 +256,7 @@ class MCTS:
         reward_epsilon=1e-6,
         patient=2
     ):
-        self.envoirment = envoirment
+        self.envoirment = environment
         self.model = model
         self.tokenizer = tokenizer
         self.num_simulations = num_simulations if num_simulations != -1 else 32
@@ -267,6 +268,7 @@ class MCTS:
         self.varentropy_lambda = 0.1
 
     def search(self, root_node):
+
         if not root_node.children:
             root_node.value = 0
 
@@ -288,6 +290,11 @@ class MCTS:
         # return self.get_policy_from_visits(root_node)
 
     def simulate(self, node):
+        """
+          either expands and evaluates the node itself (if not children or max children not yet reached)
+          , or the best of its children (in that case: recursive call!); updates the node's value and returns it
+        
+        """
         if node.is_leaf() or node.should_expand():
             value = self.expand_node(node) * self.discount_factor
         else:
@@ -298,6 +305,9 @@ class MCTS:
         return node.value
 
     def expand_node(self, node):
+        """
+          node expansion:
+        """
         texts, policy_probs, entropys, varentropys, metas = meta_compute_policy_head(self.model, self.tokenizer, node, self.num_candidates, envoirment=self.envoirment)
 
         for i, (text, policy_prob, entropy, varentropy, meta) in enumerate(zip(texts, policy_probs, entropys, varentropys, metas)):
@@ -385,6 +395,7 @@ from functools import lru_cache
 import random
 
 # 模板生成函数
+# Template generation functions
 def problem_declaration_template(problem):
     return f"<start_of_father_id>-1<end_of_father_id><start_of_local_id>0<end_of_local_id><start_of_thought><problem>{problem}<end_of_thought>"
 
@@ -424,6 +435,7 @@ def find_max_reward_path(node):
     return math.exp(reward), path
 
 # 数值稳定的 softmax 函数
+# Numerically stable softmax functions
 def robust_softmax(logits):
     logits = torch.tensor(logits) if not isinstance(logits, torch.Tensor) else logits
     log_probs = F.log_softmax(logits, dim=-1)
@@ -432,6 +444,7 @@ def robust_softmax(logits):
 
 
 # 长度归一化的对数概率、熵和熵的方差计算
+# Length-normalized log probability, entropy, and variance calculation of entropy
 def length_normed_log_probs(sequence_ids, logits_tensor, attention_mask=None, return_entropy=False, return_varentropy=False):
     logits_tensor = logits_tensor[..., :-1, :].contiguous()
     sequence_ids = sequence_ids[..., 1:].contiguous()
@@ -469,6 +482,7 @@ def length_normed_log_probs(sequence_ids, logits_tensor, attention_mask=None, re
 
 
 # 策略生成的主要函数
+# Value header generation function
 @torch.no_grad()
 def compute_policy_head(model, tokenizer, selected_node, num_candidates=3, meta="", envoirment=None):
     local_id = get_max_node_id_in_tree(selected_node) + 1
@@ -546,6 +560,7 @@ def compute_value_head(model, tokenizer, node):
 
 
 # 元策略生成函数
+# Meta-strategy generation function
 @torch.no_grad()
 def meta_compute_policy_head(model, tokenizer, selected_node, num_candidates=3, meta_ratio=0.5, envoirment=None):
     metas = sampling_meta_action(selected_node, num_candidates)
@@ -579,15 +594,27 @@ def tokenize_policy_predict(nodes,tokenizer):
     return ret
 
 def forward_policy_predict(model,tokenizer,inputs):
+    """
+        - queries the model for the input_ids of the input
+        - expectes the output to contain an "answer" of same length as the "target_ids"
+        - computes CE Loss by comparing the answer logits with target logit ids
+
+    :param model:
+    :param tokenizer:
+    :param inputs:
+    :return:  vector of log_probs for the expected target logit ids
+    """
     inputs = {k: v.to(accelerator.device) for k, v in inputs.items()}
     input_ids = inputs["input_ids"]
     attention_mask = inputs["attention_mask"]
     target_ids = inputs["target"]
     target_mask = inputs["target_attention_mask"]
     outputs = model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
-    logits = outputs.logits[:,:-1,:][:, -target_ids[:,1:].shape[-1] :] 
+    # extract the "answer" logits (where expected in the outputs, of the same length as target (modulo special tokens)
+    logits = outputs.logits[:,:-1,:][:, -target_ids[:,1:].shape[-1] :]
     log_probs = F.log_softmax(logits, dim=-1)
-    seleted_log_probs = log_probs.gather(2, target_ids[:,1:].unsqueeze(-1)).squeeze(-1) 
+    # compute loss by checking log probs at target ids (i.e. CE loss)
+    seleted_log_probs = log_probs.gather(2, target_ids[:,1:].unsqueeze(-1)).squeeze(-1)
     return seleted_log_probs
 
 def tokenize_value_predict(node,tokenizer):
@@ -600,6 +627,16 @@ def tokenize_value_predict(node,tokenizer):
 import torch
 
 def forward_value_predict(model, tokenizer, inputs):
+    """
+     - query the model with "value_input_ids"
+      - look at expected position for evaluation token (pos or negatvie)
+      - return logits at this pos for "positiv_rating" , "negative_rating") (tuple)
+
+    :param model:
+    :param tokenizer:
+    :param inputs:
+    :return:
+    """
     inputs = {k: v.to(accelerator.device) for k, v in inputs.items()}
     input_ids = inputs.pop("value_input_ids")
     attention_mask = inputs.pop("value_attention_mask")
@@ -610,14 +647,15 @@ def forward_value_predict(model, tokenizer, inputs):
     # 获取 "<positive_rating>" 和 "<negative_rating>" 的 token ID
     positive_token_id = tokenizer.convert_tokens_to_ids("<positive_rating>")
     negative_token_id = tokenizer.convert_tokens_to_ids("<negative_rating>")
+    indices = torch.tensor([positive_token_id, negative_token_id], device=accelerator.device)  # [2]
 
     # 构建索引张量
     batch_size = logits.size(0)
-    indices = torch.tensor([positive_token_id, negative_token_id], device=accelerator.device)  # [2]
 
     # 扩展 indices 以匹配输入 logits 的维度
     selected_logit = logits[range(batch_size), pos]  # [batch_size, num_tokens]
     selected_logit = selected_logit[:, indices]      # 提取每行中指定 token 的 logits
+
 
     return selected_logit
 
@@ -781,7 +819,7 @@ class RLSPTrainer(Trainer):
             args=args,
             **kwargs
         )
-        self.envoirment = envoirment
+        self.environment = envoirment
         self.mcts = mcts
         self.tokenizer = tokenizer
         self.replay_buffer = PrioritizedReplayBuffer(capacity=replay_buffer_capacity)
@@ -791,6 +829,8 @@ class RLSPTrainer(Trainer):
         self.model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
 
     def self_play(self, initial_state):
+        # cf. https://stackoverflow.com/questions/60018578/what-does-model-eval-do-in-pytorch /
+        # switch to "evaluation" mode in model -> turn off gradients etc.
         self.model.eval()
         """Perform self-play to generate experiences."""
         root_node = TreeNode(state=initial_state)
@@ -865,14 +905,22 @@ class RLSPTrainer(Trainer):
         """Compute the loss, incorporating importance-sampling weights."""
 
         # Compute policy loss using PPO
+        #
+
+        # compute CE loss (meaning: "does the model give the right answer?") for both the "trained" model, as well as the base model (model without adapter)
         new_policy_log_probs = forward_policy_predict(self.model, self.tokenizer, inputs)
         with torch.no_grad():
+            # base model -> peft framework? -> likely: original model without adapter (to be verified=
             old_policy_log_probs = forward_policy_predict(self.model.get_base_model(), self.tokenizer, inputs).detach()
+
+       # at this point:          new_policy_log_probs and     old_policy_log_probs :  log probs of the expected answer tokens
         target_mask = inputs['target_attention_mask']
         advantage = inputs['advantage']
         epsilon = 0.2  # PPO clip parameter
-
+        # i.e. ratio of token probabilities model / base_model; masked with target mask
         ratio = (new_policy_log_probs - old_policy_log_probs).exp() * target_mask[:,1:]
+        # todo: klemmf What is advantage in PPO?
+        # excactly as in https://spinningup.openai.com/en/latest/algorithms/ppo.html#key-equations
         surr1 = ratio * advantage.unsqueeze(-1)
         surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * advantage.unsqueeze(-1)
         policy_loss = -torch.min(surr1, surr2).mean()
@@ -924,7 +972,12 @@ class RLSPTrainer(Trainer):
 
 
             # Self-play to collect new experiences
-            initial_state = self.envoirment.sample_initial_state()
+
+
+            # sample an initial state Tuple [prompt , answer]
+            #   - Prompt: <start_of_father_id>-1<end_of_father_id><start_of_local_id>0<end_of_local_id><start_of_thought><problem>{problem as in data}<end_of_thought>"
+            #   - answer as in data (called ground truth)
+            initial_state = self.environment.sample_initial_state()
             root_node = self.self_play(initial_state)
             self.collect_experience(root_node)
 
@@ -998,8 +1051,21 @@ class Environment:
         从问题列表中随机采样一个初始状态（数学问题）。
 
         返回：
+
+
+
         - initial_state: 选中的问题文本。
         - ground_truth: 该问题的正确答案，用于后续的答案验证。
+
+
+        Randomly sample an initial state from the problem list (math problem).
+
+
+        Returns:
+
+        - initial_state: text of the selected question.
+
+        - ground_truth: The correct answer to the question, to be used for subsequent answer verification.
         """
         selected_problem = random.choice(self.problems)
         initial_state = problem_declaration_template(selected_problem['problem'])
@@ -1085,46 +1151,54 @@ reward_epsilon = 1e-6
 
 from datasets import load_dataset
 
-ds = load_dataset("openai/gsm8k", "main")['train']
 
-problems = [{"problem": p['question'], "ground_truth": p['answer']} for p in ds]
 
-# ds = load_dataset("lighteval/MATH", "all")['train']
+if __name__ == "__main__":
+    ds = load_dataset("openai/gsm8k", "main")['train']
 
-# problems = [{"problem": p['problem'], "ground_truth": p['solution']} for p in ds]
+    problems = [{"problem": p['question'], "ground_truth": p['answer']} for p in ds]
 
-envoirment = Environment(problems)
+    # ds = load_dataset("lighteval/MATH", "all")['train']
 
-# 创建 MCTS 实例
-mcts = MCTS(
-    envoirment=envoirment,
-    model=model,
-    tokenizer=tokenizer,
-    num_simulations=num_simulations,
-    num_candidates_per_expansion=num_candidates_per_expansion,
-    exploration_const=exploration_const,
-    discount_factor=discount_factor,
-    reward_epsilon=reward_epsilon
-)
+    # problems = [{"problem": p['problem'], "ground_truth": p['solution']} for p in ds]
 
-args = TrainingArguments(gradient_accumulation_steps=32,per_device_train_batch_size=4,output_dir='./output')
+    environment = Environment(problems)
 
-# 创建 RLSPTrainer 实例
-trainer = RLSPTrainer(
-    envoirment=envoirment,
-    model=model,
-    tokenizer=tokenizer,
-    mcts=mcts,
-    replay_buffer_capacity=100000,
-    args=args,
-)
+    # 创建 MCTS 实例
+    # Creating an MCTS Instance
+    mcts = MCTS(
+        environment=environment,
+        model=model,
+        tokenizer=tokenizer,
+        num_simulations=num_simulations,
+        num_candidates_per_expansion=num_candidates_per_expansion,
+        exploration_const=exploration_const,
+        discount_factor=discount_factor,
+        reward_epsilon=reward_epsilon
+    )
 
-accelerator = trainer.accelerator
-model = model.to(accelerator.device)
+    args = TrainingArguments(gradient_accumulation_steps=32,per_device_train_batch_size=4,output_dir='./output')
 
-# 设置训练轮数和批次大小
-num_iterations = 1
+    # 创建 RLSPTrainer 实例
+    # Creating an instance of RLSPTrainer
+    trainer = RLSPTrainer(
+        envoirment=environment,
+        model=model,
+        tokenizer=tokenizer,
+        mcts=mcts,
+        replay_buffer_capacity=100000,
+        args=args,
+    )
 
-# 执行训练
-trainer.train(num_iterations=num_iterations)
-model.save_pretrained('./output')
+    accelerator = trainer.accelerator
+    print(f"accelerator.device {accelerator.device}")
+    model = model.to(accelerator.device)
+
+    # 设置训练轮数和批次大小
+    # Setting the number of training rounds and batch size
+    num_iterations = 1
+
+    # 执行训练
+    trainer.train(num_iterations=num_iterations)
+    model.save_pretrained('./output')
+
